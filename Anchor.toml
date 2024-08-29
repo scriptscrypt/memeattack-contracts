@@ -6,7 +6,7 @@ skip-lint = false
 
 [programs.localnet]
 meme-test = "8xh4CD178CdwpCsrtYmCR9pHWTfiVroqDfEc8neiPcbs"
-my_meme_coin_game = "CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj"
+meme_coin_game = "CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj"
 
 [registry]
 url = "https://api.apr.dev"

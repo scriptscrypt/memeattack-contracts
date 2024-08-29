@@ -84,10 +84,13 @@ pub mod meme_coin_game {
         }
 
         // Update the player's contribution
-        if let Some(contribution) = box_entry.contributions.iter_mut().find(|(pubkey, _)| pubkey == &player.key()) {
-            contribution.1 += amount_in_lamports;
+        if let Some(contribution) = box_entry.contributions.iter_mut().find(|c| c.contributor == player.key()) {
+            contribution.amount += amount_in_lamports;
         } else {
-            box_entry.contributions.push((player.key(), amount_in_lamports));
+            box_entry.contributions.push(Contribution {
+                contributor: player.key(),
+                amount: amount_in_lamports,
+            });
         }
 
         // Transfer SOL from player to the program account
@@ -130,7 +133,7 @@ pub mod meme_coin_game {
         );
 
         let time_elapsed = clock.unix_timestamp - box_entry.start_time;
-        require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed);
+        //require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed);
 
         // Calculate the prize amount based on the box's current amount
         let total_prize = box_entry.amount_in_lamports;
@@ -138,8 +141,8 @@ pub mod meme_coin_game {
         // Calculate the player's share of the prize
         let player_contribution = box_entry.contributions
         .iter()
-        .find(|(pubkey, _)| pubkey == &player.key())
-        .map(|(_, amount)| *amount)
+        .find(|c| c.contributor == player.key())
+        .map(|c| c.amount)
         .unwrap_or(0);
         let player_share = (player_contribution as u128 * total_prize as u128
             / box_entry.amount_in_lamports as u128) as u64;
@@ -151,7 +154,7 @@ pub mod meme_coin_game {
         let prize_share = player_share;
 
         // Remove the player's contribution
-        box_entry.contributions.retain(|(pubkey, _)| pubkey != &player.key());
+        box_entry.contributions.retain(|c| c.contributor != player.key());
         box_entry.amount_in_lamports -= player_contribution;
 
         // If all contributions have been claimed, reset the box
@@ -244,7 +247,13 @@ pub struct Box {
     pub meme_coin_name: String,
     pub amount_in_lamports: u64,
     pub start_time: i64,
-    pub contributions: Vec<(Pubkey, u64)>,
+    pub contributions: Vec<Contribution>,
+}
+
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Debug)]
+pub struct Contribution {
+    pub contributor: Pubkey,
+    pub amount: u64,
 }
 
 #[error_code]
@@ -262,3 +271,4 @@ pub enum ErrorCode {
     #[msg("60 minutes have not elapsed yet")]
     TimeNotElapsed,
 }
+
