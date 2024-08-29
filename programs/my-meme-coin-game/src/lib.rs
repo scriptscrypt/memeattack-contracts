@@ -1,35 +1,34 @@
 use anchor_lang::prelude::*;
 use std::collections::HashMap;
+use borsh::{BorshDeserialize, BorshSerialize};
 
-declare_id!("CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj");
+declare_id!("FrheP2MW6jDuSrvKVyAjQeCjrY8VuitWLmgxRaDeCKWh");
 
 #[program]
 pub mod meme_coin_game {
     use super::*;
 
     pub fn initialize(ctx: Context<Initialize>, initial_prize_per_box: u64) -> Result<()> {
-        let game_state = &mut ctx.accounts.game_state;
-        game_state.boxes = [Box::default(); 9];
-        game_state.prize_pool = initial_prize_per_box * 9;
+        let total_prize = initial_prize_per_box * 9;
 
-        // Initialize each box with the initial prize
-        for box_entry in game_state.boxes.iter_mut() {
-            box_entry.amount_in_lamports = initial_prize_per_box;
+        for i in 0..9 {
+            ctx.accounts.game_state.boxes[i] = GameBox {
+                amount_in_lamports: initial_prize_per_box,
+                ..Default::default()
+            };
         }
 
-        // Transfer the initial prize pool from the initializer
-        let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
-            &ctx.accounts.user.key(),
-            &ctx.accounts.game_state.key(),
-            game_state.prize_pool,
-        );
-        anchor_lang::solana_program::program::invoke(
-            &transfer_instruction,
-            &[
-                ctx.accounts.user.to_account_info(),
-                ctx.accounts.game_state.to_account_info(),
+        ctx.accounts.game_state.prize_pool = total_prize;
+
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
-            ],
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.user.to_account_info(),
+                    to: ctx.accounts.game_state.to_account_info(),
+                },
+            ),
+            total_prize,
         )?;
 
         Ok(())
@@ -41,102 +40,87 @@ pub mod meme_coin_game {
         amount_in_lamports: u64,
         box_number: u8,
     ) -> Result<()> {
-        let game_state = &mut ctx.accounts.game_state;
-        let player = &ctx.accounts.player;
-        let clock = Clock::get()?;
-
         require!(box_number < 9, ErrorCode::InvalidBoxNumber);
         require!(amount_in_lamports > 0, ErrorCode::InvalidAmount);
 
-        let box_entry = &mut game_state.boxes[box_number as usize];
+        let clock = Clock::get()?;
+        let box_entry = &mut ctx.accounts.game_state.boxes[box_number as usize];
 
         if box_entry.meme_coin_name == meme_coin_name {
-            // Same memecoin, just add to the amount
             box_entry.amount_in_lamports += amount_in_lamports;
-            // Don't reset the timer for the same memecoin
         } else {
-            // Different memecoin
             let new_total = box_entry.amount_in_lamports + amount_in_lamports;
-            if new_total > box_entry.amount_in_lamports {
-                // New memecoin takes the lead
+            if amount_in_lamports > box_entry.amount_in_lamports {
                 box_entry.meme_coin_name = meme_coin_name;
                 box_entry.amount_in_lamports = new_total;
-                box_entry.start_time = clock.unix_timestamp; // Reset the timer
-                box_entry.contributions.clear(); // Clear previous contributions
+                box_entry.start_time = clock.unix_timestamp;
+                box_entry.contributions.clear();
             } else {
-                // Just add to the total without changing the leader
                 box_entry.amount_in_lamports = new_total;
             }
         }
 
-        // Update the player's contribution
-        *box_entry.contributions.entry(player.key()).or_insert(0) += amount_in_lamports;
+        *box_entry
+            .contributions
+            .entry(ctx.accounts.player.key())
+            .or_insert(0) += amount_in_lamports;
 
-        // Transfer SOL from player to the program account
-        let transfer_instruction = anchor_lang::solana_program::system_instruction::transfer(
-            &player.key(),
-            &ctx.accounts.game_state.key(),
-            amount_in_lamports,
-        );
-        anchor_lang::solana_program::program::invoke(
-            &transfer_instruction,
-            &[
-                player.to_account_info(),
-                ctx.accounts.game_state.to_account_info(),
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
                 ctx.accounts.system_program.to_account_info(),
-            ],
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.player.to_account_info(),
+                    to: ctx.accounts.game_state.to_account_info(),
+                },
+            ),
+            amount_in_lamports,
         )?;
 
-        game_state.prize_pool += amount_in_lamports;
+        ctx.accounts.game_state.prize_pool += amount_in_lamports;
 
         Ok(())
     }
 
-    pub fn claim_prize(ctx: Context<ClaimPrize>, box_number: u8, meme_coin_name: String) -> Result<()> {
-        let game_state = &mut ctx.accounts.game_state;
-        let player = &ctx.accounts.player;
-        let clock = Clock::get()?;
-
+    pub fn claim_prize(
+        ctx: Context<ClaimPrize>,
+        box_number: u8,
+        meme_coin_name: String,
+    ) -> Result<()> {
         require!(box_number < 9, ErrorCode::InvalidBoxNumber);
 
-        let box_entry = &mut game_state.boxes[box_number as usize];
-
+        let game_state = &mut ctx.accounts.game_state;
+        let box_entry = &game_state.boxes[box_number as usize];
         require!(box_entry.meme_coin_name == meme_coin_name, ErrorCode::NotBoxOwner);
 
+        let clock = Clock::get()?;
         let time_elapsed = clock.unix_timestamp - box_entry.start_time;
-        require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed); // 3600 seconds = 1 hour
+        require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed);
 
-        // Calculate the prize amount based on the box's current amount
         let total_prize = box_entry.amount_in_lamports;
+        let player_key = ctx.accounts.player.key();
+        let player_contribution = *box_entry.contributions.get(&player_key).unwrap_or(&0);
+        let player_share = ((player_contribution as u128) * (total_prize as u128) / (box_entry.amount_in_lamports as u128)) as u64;
 
-        // Calculate the player's share of the prize
-        let player_contribution = box_entry.contributions.get(&player.key()).unwrap_or(&0);
-        let player_share = ((*player_contribution as u128) * (total_prize as u128) / (box_entry.amount_in_lamports as u128)) as u64;
+        let box_entry = &mut game_state.boxes[box_number as usize];
+        box_entry.contributions.remove(&player_key);
+        box_entry.amount_in_lamports -= player_contribution;
 
-        // Transfer the prize share to the winner
-        **game_state.to_account_info().try_borrow_mut_lamports()? -= player_share;
-        **player.to_account_info().try_borrow_mut_lamports()? += player_share;
-
-        // Remove the player's contribution
-        box_entry.contributions.remove(&player.key());
-        box_entry.amount_in_lamports -= *player_contribution;
-
-        // If all contributions have been claimed, reset the box
         if box_entry.contributions.is_empty() {
-            *box_entry = Box::default();
+            *box_entry = GameBox::default();
         }
 
-        // Reduce prize pool
         game_state.prize_pool -= player_share;
+
+        **ctx.accounts.game_state.to_account_info().try_borrow_mut_lamports()? -= player_share;
+        **ctx.accounts.player.to_account_info().try_borrow_mut_lamports()? += player_share;
 
         Ok(())
     }
 }
 
-// Initially, there is no account, we need to make sure user pays for the account creation (payer=user)
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = user, space = 8 + 9 * (32 + 32 + 8 + 8) + 8)]
+    #[account(init, payer = user, space = 8 + GameState::LEN)]
     pub game_state: Account<'info, GameState>,
     #[account(mut)]
     pub user: Signer<'info>,
@@ -162,16 +146,50 @@ pub struct ClaimPrize<'info> {
 
 #[account]
 pub struct GameState {
-    pub boxes: [Box; 9],
+    pub boxes: [GameBox; 9],
     pub prize_pool: u64,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
-pub struct Box {
+impl GameState {
+    pub const LEN: usize = 8 + (9 * GameBox::LEN) + 8;
+}
+
+#[derive(Clone, Default)]
+pub struct GameBox {
     pub meme_coin_name: String,
     pub amount_in_lamports: u64,
     pub start_time: i64,
     pub contributions: HashMap<Pubkey, u64>,
+}
+
+impl BorshSerialize for GameBox {
+    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
+        self.meme_coin_name.serialize(writer)?;
+        self.amount_in_lamports.serialize(writer)?;
+        self.start_time.serialize(writer)?;
+        self.contributions.serialize(writer)?;
+        Ok(())
+    }
+}
+
+impl BorshDeserialize for GameBox {
+    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
+        let meme_coin_name = String::deserialize_reader(reader)?;
+        let amount_in_lamports = u64::deserialize_reader(reader)?;
+        let start_time = i64::deserialize_reader(reader)?;
+        let contributions = HashMap::<Pubkey, u64>::deserialize_reader(reader)?;
+
+        Ok(GameBox {
+            meme_coin_name,
+            amount_in_lamports,
+            start_time,
+            contributions,
+        })
+    }
+}
+
+impl GameBox {
+    pub const LEN: usize = 32 + 8 + 8 + 32 * 8 + 8;
 }
 
 #[error_code]
