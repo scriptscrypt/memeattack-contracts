@@ -105,6 +105,9 @@ pub mod meme_box_game {
         let contributions = box_entry.contributions.clone();
         let winning_amount = box_entry.current_leader.amount;
     
+        // Drop the mutable borrow of game_state
+        drop(game_state);
+    
         // Perform swaps for each winning contribution
         for contribution in contributions.iter().filter(|c| c.token_mint == winning_token_mint) {
             let contributor_share = ((contribution.amount as u128 * total_prize as u128) / (winning_amount as u128)) as u64;
@@ -116,6 +119,10 @@ pub mod meme_box_game {
                 contribution.user,
             )?;
         }
+    
+        // Re-borrow game_state as mutable
+        let game_state = &mut ctx.accounts.game_state;
+        let box_entry = &mut game_state.boxes[box_number as usize];
     
         // Reset the box after rewards distribution
         *box_entry = Box::default();
