@@ -4,7 +4,7 @@
 resolution = true
 skip-lint = false
 
-[programs.localnet]
+[programs.devnet]
 meme-test = "8xh4CD178CdwpCsrtYmCR9pHWTfiVroqDfEc8neiPcbs"
 meme_coin_game = "CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj"
 
@@ -12,7 +12,7 @@ meme_coin_game = "CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj"
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "Localnet"
+cluster = "Devnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
