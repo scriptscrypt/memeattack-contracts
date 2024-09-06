@@ -1,126 +1,132 @@
 use anchor_lang::prelude::*;
-use std::collections::HashMap;
-use borsh::{BorshDeserialize, BorshSerialize};
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use solana_program::instruction::Instruction;
 
-declare_id!("FrheP2MW6jDuSrvKVyAjQeCjrY8VuitWLmgxRaDeCKWh");
+declare_id!("CkrDU8u3B4fehXLzNPvDKpbbjZ5fAWt6bDp3t6j9prXj");
+
+// Raydium program ID
+pub const RAYDIUM_SWAP_PROGRAM_ID_MAINNET: Pubkey = solana_program::pubkey!("675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8");
+pub const RAYDIUM_SWAP_PROGRAM_ID_DEVNET: Pubkey = solana_program::pubkey!("HWy1jotHpo6UqeQxx49dpYYdQB8wj9Qk9MdxwjLvDHB8");
 
 #[program]
-pub mod meme_coin_game {
+pub mod meme_box_game {
     use super::*;
 
-    pub fn initialize(ctx: Context<Initialize>, initial_prize_per_box: u64) -> Result<()> {
-        let total_prize = initial_prize_per_box * 9;
-
-        for i in 0..9 {
-            ctx.accounts.game_state.boxes[i] = GameBox {
-                amount_in_lamports: initial_prize_per_box,
-                ..Default::default()
-            };
-        }
-
-        ctx.accounts.game_state.prize_pool = total_prize;
-
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.user.to_account_info(),
-                    to: ctx.accounts.game_state.to_account_info(),
-                },
-            ),
-            total_prize,
-        )?;
-
+    pub fn initialize_game(ctx: Context<InitializeGame>) -> Result<()> {
+        let game_state = &mut ctx.accounts.game_state;
+        game_state.boxes = vec![Box::default(); 9];
         Ok(())
     }
 
-    pub fn enter_game(
-        ctx: Context<EnterGame>,
-        meme_coin_name: String,
-        amount_in_lamports: u64,
-        box_number: u8,
-    ) -> Result<()> {
-        require!(box_number < 9, ErrorCode::InvalidBoxNumber);
-        require!(amount_in_lamports > 0, ErrorCode::InvalidAmount);
-
-        let clock = Clock::get()?;
-        let box_entry = &mut ctx.accounts.game_state.boxes[box_number as usize];
-
-        if box_entry.meme_coin_name == meme_coin_name {
-            box_entry.amount_in_lamports += amount_in_lamports;
-        } else {
-            let new_total = box_entry.amount_in_lamports + amount_in_lamports;
-            if amount_in_lamports > box_entry.amount_in_lamports {
-                box_entry.meme_coin_name = meme_coin_name;
-                box_entry.amount_in_lamports = new_total;
-                box_entry.start_time = clock.unix_timestamp;
-                box_entry.contributions.clear();
-            } else {
-                box_entry.amount_in_lamports = new_total;
-            }
-        }
-
-        *box_entry
-            .contributions
-            .entry(ctx.accounts.player.key())
-            .or_insert(0) += amount_in_lamports;
-
-        anchor_lang::system_program::transfer(
-            CpiContext::new(
-                ctx.accounts.system_program.to_account_info(),
-                anchor_lang::system_program::Transfer {
-                    from: ctx.accounts.player.to_account_info(),
-                    to: ctx.accounts.game_state.to_account_info(),
-                },
-            ),
-            amount_in_lamports,
-        )?;
-
-        ctx.accounts.game_state.prize_pool += amount_in_lamports;
-
-        Ok(())
-    }
-
-    pub fn claim_prize(
-        ctx: Context<ClaimPrize>,
-        box_number: u8,
-        meme_coin_name: String,
-    ) -> Result<()> {
+    pub fn create_box(ctx: Context<CreateBox>, box_number: u8, token_mint: Pubkey) -> Result<()> {
         require!(box_number < 9, ErrorCode::InvalidBoxNumber);
 
         let game_state = &mut ctx.accounts.game_state;
-        let box_entry = &game_state.boxes[box_number as usize];
-        require!(box_entry.meme_coin_name == meme_coin_name, ErrorCode::NotBoxOwner);
-
-        let clock = Clock::get()?;
-        let time_elapsed = clock.unix_timestamp - box_entry.start_time;
-        require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed);
-
-        let total_prize = box_entry.amount_in_lamports;
-        let player_key = ctx.accounts.player.key();
-        let player_contribution = *box_entry.contributions.get(&player_key).unwrap_or(&0);
-        let player_share = ((player_contribution as u128) * (total_prize as u128) / (box_entry.amount_in_lamports as u128)) as u64;
-
         let box_entry = &mut game_state.boxes[box_number as usize];
-        box_entry.contributions.remove(&player_key);
-        box_entry.amount_in_lamports -= player_contribution;
 
-        if box_entry.contributions.is_empty() {
-            *box_entry = GameBox::default();
+        require!(box_entry.start_time == 0, ErrorCode::BoxAlreadyExists);
+
+        box_entry.token_mint = token_mint;
+        box_entry.start_time = Clock::get()?.unix_timestamp;
+        box_entry.last_leader_change_time = box_entry.start_time;
+
+        Ok(())
+    }
+
+    pub fn contribute(ctx: Context<Contribute>, box_number: u8, amount: u64) -> Result<()> {
+        require!(box_number < 9, ErrorCode::InvalidBoxNumber);
+
+        let game_state = &mut ctx.accounts.game_state;
+        let box_entry = &mut game_state.boxes[box_number as usize];
+
+        require!(box_entry.start_time != 0, ErrorCode::BoxDoesNotExist);
+
+        // Transfer tokens from user to box token account
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.user_token_account.to_account_info(),
+            to: ctx.accounts.box_token_account.to_account_info(),
+            authority: ctx.accounts.user.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        token::transfer(cpi_ctx, amount)?;
+
+        // Update box state
+        box_entry.total_amount += amount;
+
+        // Update contributions
+        let user_pubkey = ctx.accounts.user.key();
+        let token_mint = ctx.accounts.user_token_account.mint;
+        if let Some(contribution) = box_entry.contributions.iter_mut().find(|c| c.user == user_pubkey && c.token_mint == token_mint) {
+            contribution.amount += amount;
+        } else {
+            box_entry.contributions.push(TokenContribution {
+                user: user_pubkey,
+                token_mint,
+                amount,
+            });
         }
 
-        game_state.prize_pool -= player_share;
+        // Update leader if necessary
+        let current_time = Clock::get()?.unix_timestamp;
+        let token_total = box_entry.contributions.iter()
+            .filter(|c| c.token_mint == token_mint)
+            .map(|c| c.amount)
+            .sum::<u64>();
 
-        **ctx.accounts.game_state.to_account_info().try_borrow_mut_lamports()? -= player_share;
-        **ctx.accounts.player.to_account_info().try_borrow_mut_lamports()? += player_share;
+        if token_total > box_entry.current_leader.amount {
+            if box_entry.current_leader.amount > 0 {
+                box_entry.previous_leaders.push(box_entry.current_leader.clone());
+            }
+            box_entry.current_leader = Leader {
+                token_mint,
+                amount: token_total,
+            };
+            box_entry.last_leader_change_time = current_time;
+        }
 
+        Ok(())
+    }
+
+    pub fn process_rewards(ctx: Context<ProcessRewards>, box_number: u8) -> Result<()> {
+        require!(box_number < 9, ErrorCode::InvalidBoxNumber);
+    
+        let game_state = &mut ctx.accounts.game_state;
+        let box_entry = &mut game_state.boxes[box_number as usize];
+        let clock = Clock::get()?;
+        let time_elapsed = clock.unix_timestamp - box_entry.last_leader_change_time;
+        require!(time_elapsed >= 3600, ErrorCode::TimeNotElapsed);
+    
+        // Calculate rewards based on contributions
+        let total_prize = box_entry.total_amount;
+        let winning_token_mint = box_entry.current_leader.token_mint;
+    
+        // Clone the necessary data to avoid borrowing issues
+        let contributions = box_entry.contributions.clone();
+        let winning_amount = box_entry.current_leader.amount;
+    
+        // Perform swaps for each winning contribution
+        for contribution in contributions.iter().filter(|c| c.token_mint == winning_token_mint) {
+            let contributor_share = ((contribution.amount as u128 * total_prize as u128) / (winning_amount as u128)) as u64;
+    
+            // Perform on-chain swap using Raydium
+            raydium_swap(
+                &ctx.accounts,
+                contributor_share,
+                contribution.user,
+            )?;
+        }
+    
+        // Reset the box after rewards distribution
+        *box_entry = Box::default();
+    
         Ok(())
     }
 }
 
 #[derive(Accounts)]
-pub struct Initialize<'info> {
-    #[account(init, payer = user, space = 8 + GameState::LEN)]
+pub struct InitializeGame<'info> {
+    #[account(init, payer = user, space = 8 + 9 * 200)]
     pub game_state: Account<'info, GameState>,
     #[account(mut)]
     pub user: Signer<'info>,
@@ -128,78 +134,195 @@ pub struct Initialize<'info> {
 }
 
 #[derive(Accounts)]
-pub struct EnterGame<'info> {
+pub struct CreateBox<'info> {
     #[account(mut)]
     pub game_state: Account<'info, GameState>,
     #[account(mut)]
-    pub player: Signer<'info>,
-    pub system_program: Program<'info, System>,
+    pub user: Signer<'info>,
 }
 
 #[derive(Accounts)]
-pub struct ClaimPrize<'info> {
+pub struct Contribute<'info> {
     #[account(mut)]
     pub game_state: Account<'info, GameState>,
     #[account(mut)]
-    pub player: Signer<'info>,
+    pub user: Signer<'info>,
+    #[account(mut)]
+    pub user_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub box_token_account: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
+#[derive(Accounts)]
+pub struct ProcessRewards<'info> {
+    #[account(mut)]
+    pub game_state: Account<'info, GameState>,
+    #[account(mut)]
+    pub box_token_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub recipient: SystemAccount<'info>,
+    pub token_program: Program<'info, Token>,
+    pub system_program: Program<'info, System>,
+    #[account(mut)]
+    pub user_account: AccountInfo<'info>, // Add this line
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    pub raydium_program: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub amm_id: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub amm_authority: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub amm_open_orders: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub amm_target_orders: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub pool_coin_token_account: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub pool_pc_token_account: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_program: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_market: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_bids: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_asks: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_event_queue: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_coin_vault: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_pc_vault: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub serum_vault_signer: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub user_source_token_account: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub user_destination_token_account: AccountInfo<'info>,
+    /// CHECK: This is not dangerous because we don't read or write from this account
+    #[account(mut)]
+    pub user_source_owner: AccountInfo<'info>,
 }
 
 #[account]
 pub struct GameState {
-    pub boxes: [GameBox; 9],
-    pub prize_pool: u64,
+    pub boxes: Vec<Box>,
 }
 
-impl GameState {
-    pub const LEN: usize = 8 + (9 * GameBox::LEN) + 8;
-}
-
-#[derive(Clone, Default)]
-pub struct GameBox {
-    pub meme_coin_name: String,
-    pub amount_in_lamports: u64,
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
+pub struct Box {
+    pub token_mint: Pubkey,
     pub start_time: i64,
-    pub contributions: HashMap<Pubkey, u64>,
+    pub last_leader_change_time: i64,
+    pub total_amount: u64,
+    pub contributions: Vec<TokenContribution>,
+    pub current_leader: Leader,
+    pub previous_leaders: Vec<Leader>,
 }
 
-impl BorshSerialize for GameBox {
-    fn serialize<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        self.meme_coin_name.serialize(writer)?;
-        self.amount_in_lamports.serialize(writer)?;
-        self.start_time.serialize(writer)?;
-        self.contributions.serialize(writer)?;
-        Ok(())
-    }
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
+pub struct TokenContribution {
+    pub user: Pubkey,
+    pub token_mint: Pubkey,
+    pub amount: u64,
 }
 
-impl BorshDeserialize for GameBox {
-    fn deserialize_reader<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        let meme_coin_name = String::deserialize_reader(reader)?;
-        let amount_in_lamports = u64::deserialize_reader(reader)?;
-        let start_time = i64::deserialize_reader(reader)?;
-        let contributions = HashMap::<Pubkey, u64>::deserialize_reader(reader)?;
-
-        Ok(GameBox {
-            meme_coin_name,
-            amount_in_lamports,
-            start_time,
-            contributions,
-        })
-    }
-}
-
-impl GameBox {
-    pub const LEN: usize = 32 + 8 + 8 + 32 * 8 + 8;
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Default)]
+pub struct Leader {
+    pub token_mint: Pubkey,
+    pub amount: u64,
 }
 
 #[error_code]
 pub enum ErrorCode {
     #[msg("Invalid box number")]
     InvalidBoxNumber,
-    #[msg("Invalid amount")]
-    InvalidAmount,
-    #[msg("Not the leading memecoin")]
-    NotBoxOwner,
-    #[msg("60 minutes have not elapsed yet")]
+    #[msg("Box already exists")]
+    BoxAlreadyExists,
+    #[msg("Box does not exist")]
+    BoxDoesNotExist,
+    #[msg("Not enough time has elapsed")]
     TimeNotElapsed,
+}
+
+fn raydium_swap(
+    accounts: &ProcessRewards,
+    amount_in: u64,
+    user: Pubkey,
+) -> Result<()> {
+    let ix = Instruction {
+        program_id: RAYDIUM_SWAP_PROGRAM_ID_DEVNET,
+        accounts: vec![
+            AccountMeta::new(user, true),
+            AccountMeta::new(accounts.amm_id.key(), false),
+            AccountMeta::new(accounts.amm_authority.key(), false),
+            AccountMeta::new(accounts.amm_open_orders.key(), false),
+            AccountMeta::new(accounts.amm_target_orders.key(), false),
+            AccountMeta::new(accounts.pool_coin_token_account.key(), false),
+            AccountMeta::new(accounts.pool_pc_token_account.key(), false),
+            AccountMeta::new(accounts.serum_program.key(), false),
+            AccountMeta::new(accounts.serum_market.key(), false),
+            AccountMeta::new(accounts.serum_bids.key(), false),
+            AccountMeta::new(accounts.serum_asks.key(), false),
+            AccountMeta::new(accounts.serum_event_queue.key(), false),
+            AccountMeta::new(accounts.serum_coin_vault.key(), false),
+            AccountMeta::new(accounts.serum_pc_vault.key(), false),
+            AccountMeta::new(accounts.serum_vault_signer.key(), false),
+            AccountMeta::new(accounts.user_source_token_account.key(), false),
+            AccountMeta::new(accounts.user_destination_token_account.key(), false),
+            AccountMeta::new(accounts.user_source_owner.key(), true),
+            AccountMeta::new_readonly(accounts.token_program.key(), false),
+        ],
+        data: raydium_swap_instruction_data(amount_in),
+    };
+
+    solana_program::program::invoke(
+        &ix,
+        &[
+            accounts.amm_id.clone(),
+            accounts.amm_authority.clone(),
+            accounts.amm_open_orders.clone(),
+            accounts.amm_target_orders.clone(),
+            accounts.pool_coin_token_account.clone(),
+            accounts.pool_pc_token_account.clone(),
+            accounts.serum_program.clone(),
+            accounts.serum_market.clone(),
+            accounts.serum_bids.clone(),
+            accounts.serum_asks.clone(),
+            accounts.serum_event_queue.clone(),
+            accounts.serum_coin_vault.clone(),
+            accounts.serum_pc_vault.clone(),
+            accounts.serum_vault_signer.clone(),
+            accounts.user_source_token_account.clone(),
+            accounts.user_destination_token_account.clone(),
+            accounts.user_source_owner.clone(), // This should now be the user's account
+            accounts.token_program.to_account_info(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn raydium_swap_instruction_data(amount_in: u64) -> Vec<u8> {
+    let mut data = Vec::with_capacity(9);
+    data.push(9); // Instruction code for swap
+    data.extend_from_slice(&amount_in.to_le_bytes());
+    data
 }
